@@ -60,10 +60,30 @@ class RepositoryToolsTests(unittest.TestCase):
         self.assertEqual(matches[0].line, 1)
 
     def test_write_file_creates_parent_and_replaces_content(self):
-        self.tools.write_file("src/new.py", "answer = 42\n")
-        self.tools.write_file("src/new.py", "answer = 43\n")
+        first_snapshot = self.tools.write_file("src/new.py", "answer = 42\n")
+        second_snapshot = self.tools.write_file("src/new.py", "answer = 43\n")
 
         self.assertEqual(self.tools.read_file("src/new.py"), "answer = 43\n")
+        snapshots = self.tools.list_snapshots()
+        self.assertEqual({item["snapshot_id"] for item in snapshots}, {first_snapshot, second_snapshot})
+        restored = self.tools.restore_snapshot(second_snapshot)
+        self.assertEqual(self.tools.read_file("src/new.py"), "answer = 42\n")
+        self.assertEqual(restored["restored"], second_snapshot)
+        self.assertTrue(restored["rollback_snapshot"])
+
+    def test_restoring_create_snapshot_removes_file_and_makes_rollback(self):
+        snapshot_id = self.tools.write_file("new.txt", "created by agent")
+        result = self.tools.restore_snapshot(snapshot_id)
+        self.assertFalse((self.root / "new.txt").exists())
+        self.assertIn(result["rollback_snapshot"], {item["snapshot_id"] for item in self.tools.list_snapshots()})
+
+    def test_repository_map_and_project_instructions_are_bounded_and_readable(self):
+        (self.root / "README.md").write_text("Project overview", encoding="utf-8")
+        (self.root / "AGENTS.md").write_text("Project conventions", encoding="utf-8")
+        file_map = self.tools.repository_map(max_chars=200)
+        instructions = self.tools.project_instructions()
+        self.assertIn("README.md", file_map)
+        self.assertEqual(instructions, ("AGENTS.md", "Project conventions"))
 
     def test_paths_cannot_escape_repository_or_follow_symlinks(self):
         with tempfile.TemporaryDirectory() as outside_dir:

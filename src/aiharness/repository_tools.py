@@ -8,12 +8,17 @@ modify.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+from datetime import datetime, timezone
 import fnmatch
+import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import tempfile
 from typing import Optional, Sequence
+import uuid
 
 
 class ToolError(RuntimeError):
@@ -32,7 +37,7 @@ class RepositoryTools:
 
     EXCLUDED_DIRS = {
         ".git", ".hg", ".svn", ".venv", "venv", "node_modules",
-        "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+        "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".aiharness",
     }
     EXCLUDED_FILENAMES = {
         ".env", ".env.local", ".env.production", "id_rsa", "id_ed25519",
@@ -134,21 +139,146 @@ class RepositoryTools:
                         return matches
         return matches
 
-    def write_file(self, path: str, content: str) -> None:
-        """Create or replace a UTF-8 text file inside the repository atomically."""
+    def write_file(self, path: str, content: str) -> str:
+        """Snapshot then create or replace a UTF-8 text file inside the repository."""
         if len(content.encode("utf-8")) > self.max_file_bytes:
             raise ToolError(
                 f"Written content exceeds the {self.max_file_bytes}-byte limit."
             )
         target = self._safe_path(path, allow_missing_parents=True)
+        snapshot_id = self._create_snapshot(path, target)
         target.parent.mkdir(parents=True, exist_ok=True)
         # Re-check after creating parents to catch symlinked path components.
         target = self._safe_path(path)
+        self._atomic_write(target, content.encode("utf-8"))
+        return snapshot_id
+
+    def repository_map(self, limit: int = 120, max_chars: int = 8_000) -> str:
+        """Build a compact path map to guide focused repository reads."""
+        files = self.list_files(limit=limit)
+        priority = {"README.md": 0, "pyproject.toml": 1, "package.json": 2, "Makefile": 3}
+        files.sort(key=lambda name: (priority.get(name, 10), name.count("/"), name))
+        lines = ["Repository file map (paths only; inspect relevant files before editing):"]
+        lines.extend(f"- {name}" for name in files)
+        result = "\n".join(lines)
+        if len(result) > max_chars:
+            result = result[: max_chars - 32] + "\n[repository map truncated]"
+        return result
+
+    def project_instructions(self, max_chars: int = 12_000) -> Optional[tuple[str, str]]:
+        """Return a bounded root AGENTS.md instruction file, if present."""
+        for name in ("AGENTS.md", "AIHARNES.md"):
+            try:
+                content = self.read_file(name)
+            except ToolError as exc:
+                if not (self.root / name).exists():
+                    continue
+                raise exc
+            return name, content[:max_chars]
+        return None
+
+    def list_snapshots(self) -> list[dict[str, str]]:
+        """List local per-file checkpoints without exposing their saved contents."""
+        directory = self._snapshot_directory(create=False)
+        if not directory:
+            return []
+        snapshots = []
+        for snapshot_file in directory.glob("*.json"):
+            try:
+                record = json.loads(snapshot_file.read_text(encoding="utf-8"))
+                if isinstance(record, dict) and record.get("snapshot_id") == snapshot_file.stem:
+                    snapshots.append({
+                        "snapshot_id": record["snapshot_id"],
+                        "path": record["path"],
+                        "created_at": record["created_at"],
+                    })
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return sorted(snapshots, key=lambda item: item["created_at"], reverse=True)
+
+    def restore_snapshot(self, snapshot_id: str = "latest") -> dict[str, str]:
+        """Restore one checkpointed file and checkpoint the current version first."""
+        snapshots = self.list_snapshots()
+        if snapshot_id == "latest":
+            if not snapshots:
+                raise ToolError("No snapshots are available for this repository.")
+            snapshot_id = snapshots[0]["snapshot_id"]
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", snapshot_id):
+            raise ToolError("Invalid snapshot ID.")
+        directory = self._snapshot_directory(create=False)
+        if not directory:
+            raise ToolError("No snapshots are available for this repository.")
+        snapshot_file = directory / f"{snapshot_id}.json"
+        try:
+            record = json.loads(snapshot_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise ToolError(f"Snapshot not found: {snapshot_id}") from None
+        if not isinstance(record, dict) or record.get("snapshot_id") != snapshot_id:
+            raise ToolError("Snapshot is malformed.")
+        path = record.get("path")
+        if not isinstance(path, str):
+            raise ToolError("Snapshot is malformed: missing path.")
+        target = self._safe_path(path, allow_missing_parents=True)
+        rollback_id = self._create_snapshot(path, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target = self._safe_path(path)
+        if record.get("before_exists"):
+            try:
+                previous = base64.b64decode(record["before_content"], validate=True)
+            except (KeyError, ValueError, TypeError):
+                raise ToolError("Snapshot is malformed: invalid saved content.") from None
+            self._atomic_write(target, previous)
+        elif target.exists():
+            target.unlink()
+        return {"restored": snapshot_id, "path": path, "rollback_snapshot": rollback_id}
+
+    def _create_snapshot(self, path: str, target: Path) -> str:
+        if target.exists() and not target.is_file():
+            raise ToolError(f"Cannot checkpoint a non-file target: {path}")
+        previous = b""
+        exists = target.is_file()
+        if exists:
+            if target.stat().st_size > self.max_file_bytes:
+                raise ToolError(
+                    f"Cannot safely checkpoint files larger than {self.max_file_bytes} bytes."
+                )
+            previous = target.read_bytes()
+        directory = self._snapshot_directory(create=True)
+        snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
+        record = {
+            "snapshot_id": snapshot_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "path": Path(path).as_posix(),
+            "before_exists": exists,
+            "before_content": base64.b64encode(previous).decode("ascii"),
+        }
+        snapshot_file = directory / f"{snapshot_id}.json"
+        try:
+            with snapshot_file.open("x", encoding="utf-8") as stream:
+                json.dump(record, stream, ensure_ascii=False)
+            os.chmod(snapshot_file, 0o600)
+        except OSError as exc:
+            raise ToolError(f"Could not save snapshot: {exc}") from None
+        return snapshot_id
+
+    def _snapshot_directory(self, *, create: bool) -> Optional[Path]:
+        hidden = self.root / ".aiharness"
+        directory = hidden / "snapshots"
+        if hidden.is_symlink() or directory.is_symlink():
+            raise ToolError("Snapshot directory cannot be a symlink.")
+        if create:
+            hidden.mkdir(mode=0o700, exist_ok=True)
+            directory.mkdir(mode=0o700, exist_ok=True)
+        if not directory.exists():
+            return None
+        return directory
+
+    @staticmethod
+    def _atomic_write(target: Path, content: bytes) -> None:
         temporary_name: Optional[str] = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=target.parent,
-                prefix=".aiharness-", suffix=".tmp", delete=False,
+                mode="wb", dir=target.parent, prefix=".aiharness-", suffix=".tmp", delete=False
             ) as stream:
                 temporary_name = stream.name
                 stream.write(content)
@@ -156,7 +286,7 @@ class RepositoryTools:
                 os.fsync(stream.fileno())
             os.replace(temporary_name, target)
         except OSError as exc:
-            raise ToolError(f"Could not write {path}: {exc}") from None
+            raise ToolError(f"Could not write {target.name}: {exc}") from None
         finally:
             if temporary_name and os.path.exists(temporary_name):
                 os.unlink(temporary_name)

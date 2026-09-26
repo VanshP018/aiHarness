@@ -30,6 +30,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print a bounded inventory of the selected repository and exit",
     )
+    parser.add_argument(
+        "--mode", choices=("build", "review"), default="build",
+        help="Build mode asks before edits/commands; review mode is read-only",
+    )
+    parser.add_argument(
+        "--list-snapshots", action="store_true",
+        help="List saved pre-edit snapshots and exit",
+    )
+    parser.add_argument(
+        "--restore", nargs="?", const="latest", metavar="SNAPSHOT_ID",
+        help="Restore a snapshot (defaults to the latest); asks before changing files",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser.parse_args()
 
@@ -49,10 +61,27 @@ def main() -> int:
             return 2
         return 0
 
+    repository = RepositoryTools(repo)
+    if args.list_snapshots:
+        for item in repository.list_snapshots():
+            print(f"{item['snapshot_id']}  {item['path']}  {item['created_at']}")
+        return 0
+    if args.restore:
+        if not sys.stdin.isatty() or _permission_prompt("edit", f"restore snapshot {args.restore}") not in {"once", "session"}:
+            print("Snapshot restore declined; run this command in an interactive terminal to approve it.", file=sys.stderr)
+            return 1
+        try:
+            result = repository.restore_snapshot(args.restore)
+        except ToolError as exc:
+            print(f"Snapshot restore failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Restored {result['path']} from {result['restored']} (rollback snapshot: {result['rollback_snapshot']})")
+        return 0
+
     settings = Settings.from_environment()
     print(f"AI Harness v{__version__}")
     print(f"Repository: {repo}")
-    print("Phase 4 agent orchestration is ready.")
+    print(f"Mode: {args.mode} ({'read-only' if args.mode == 'review' else 'asks before edits and commands'})")
     if settings.api_key:
         print("AI_API_KEY: configured")
     else:
@@ -75,8 +104,11 @@ def main() -> int:
         try:
             agent = CodingAgent(
                 settings,
-                RepositoryTools(repo),
+                repository,
                 on_tool_call=lambda name: print(f"Tool call: {name}"),
+                mode=args.mode,
+                permission_prompt=_permission_prompt,
+                on_tool_result=_show_tool_result,
             )
             response = agent.run(task)
         except AgentError as exc:
@@ -87,3 +119,19 @@ def main() -> int:
     else:
         print("\nNo task supplied. Pass --task or provide task text on stdin.")
     return 0
+
+
+def _permission_prompt(action: str, resource: str) -> str:
+    safe = "".join(char if char.isprintable() else " " for char in resource)[:240]
+    print(f"\nPermission requested: {action} {safe}")
+    print("[o] allow once  [s] allow this exact action for this run  [d] deny")
+    try:
+        choice = input("Choose [o/s/d]: ").strip().lower()
+    except EOFError:
+        return "deny"
+    return {"o": "once", "s": "session", "d": "deny"}.get(choice, "deny")
+
+
+def _show_tool_result(name: str, result: object) -> None:
+    if name == "write_file" and isinstance(result, dict) and result.get("snapshot_id"):
+        print(f"Saved pre-edit snapshot: {result['snapshot_id']}")

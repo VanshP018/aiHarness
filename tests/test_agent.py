@@ -99,11 +99,39 @@ class CodingAgentTests(unittest.TestCase):
                 return {"choices": [{"message": {"role": "assistant", "content": "File written."}}]}
 
         with patch("aiharness.agent.OpenRouterClient", WriteClient):
-            agent = CodingAgent(self.settings, RepositoryTools(self.root))
+            agent = CodingAgent(
+                self.settings,
+                RepositoryTools(self.root),
+                permission_prompt=lambda _action, _resource: "once",
+            )
             result = agent.run("Create src/answer.txt")
 
         self.assertEqual(result, "File written.")
         self.assertEqual((self.root / "src" / "answer.txt").read_text(encoding="utf-8"), "answer = 42\n")
+        self.assertEqual(len(agent.repository.list_snapshots()), 1)
+
+    def test_build_mode_denies_edits_without_approval(self):
+        with patch("aiharness.agent.OpenRouterClient", FakeOpenRouterClient):
+            agent = CodingAgent(self.settings, RepositoryTools(self.root))
+            result = agent._execute("write_file", json.dumps({"path": "new.txt", "content": "data"}))
+        self.assertIn("Permission denied", result["error"])
+        self.assertFalse((self.root / "new.txt").exists())
+
+    def test_review_mode_exposes_only_read_tools_and_rejects_edit(self):
+        class ReviewClient(FakeOpenRouterClient):
+            def chat_completion(self, messages, tools):
+                self.requests.append((list(messages), list(tools)))
+                return {"choices": [{"message": {"role": "assistant", "content": "Review complete."}}]}
+
+        with patch("aiharness.agent.OpenRouterClient", ReviewClient):
+            agent = CodingAgent(self.settings, RepositoryTools(self.root), mode="review")
+            result = agent.run("Review the project")
+            denied = agent._execute("write_file", json.dumps({"path": "new.txt", "content": "data"}))
+
+        self.assertEqual(result, "Review complete.")
+        offered = {tool["function"]["name"] for tool in agent.client.requests[0][1]}
+        self.assertEqual(offered, {"list_files", "read_file", "search_text", "list_snapshots"})
+        self.assertIn("Permission denied", denied["error"])
 
     def test_invalid_tool_arguments_are_returned_to_model_as_tool_error(self):
         class InvalidArgsClient:
@@ -160,6 +188,21 @@ class CodingAgentTests(unittest.TestCase):
         self.assertNotIn("old-call", json.dumps(messages))
         self.assertIn("new-call", json.dumps(messages))
         self.assertEqual(messages[-1]["tool_call_id"], "new-call")
+
+    def test_startup_context_includes_map_and_root_project_guidance(self):
+        (self.root / "AGENTS.md").write_text("Use focused changes.\n", encoding="utf-8")
+        class ContextClient(FakeOpenRouterClient):
+            def chat_completion(self, messages, tools):
+                self.requests.append((list(messages), list(tools)))
+                return {"choices": [{"message": {"role": "assistant", "content": "Done."}}]}
+
+        with patch("aiharness.agent.OpenRouterClient", ContextClient):
+            agent = CodingAgent(self.settings, RepositoryTools(self.root))
+            agent.run("Summarize")
+        context = agent.client.requests[0][0][1]["content"]
+        self.assertIn("README.md", context)
+        self.assertIn("AGENTS.md", context)
+        self.assertIn("Use focused changes", context)
 
 
 if __name__ == "__main__":
