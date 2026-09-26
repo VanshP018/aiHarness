@@ -8,6 +8,7 @@ import sys
 from aiharness import __version__
 from aiharness.config import Settings
 from aiharness.model_client import ModelError, ResponsesClient
+from aiharness.repository_tools import RepositoryTools, ToolError
 
 
 def _parse_args() -> argparse.Namespace:
@@ -24,6 +25,11 @@ def _parse_args() -> argparse.Namespace:
         "--task",
         help="Engineering task to execute; if omitted, enter it interactively",
     )
+    parser.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Print a bounded inventory of the selected repository and exit",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser.parse_args()
 
@@ -35,10 +41,18 @@ def main() -> int:
         print(f"Repository directory does not exist: {repo}", file=sys.stderr)
         return 2
 
+    if args.inspect:
+        try:
+            print(RepositoryTools(repo).summary())
+        except ToolError as exc:
+            print(f"Repository inspection failed: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
     settings = Settings.from_environment()
     print(f"AI Harness v{__version__}")
     print(f"Repository: {repo}")
-    print("Phase 2 model interface is ready.")
+    print("Phase 3 repository tools are ready.")
     if settings.api_key:
         print("AI_API_KEY: configured")
     else:
