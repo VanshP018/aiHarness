@@ -4,10 +4,12 @@ import argparse
 import os
 from pathlib import Path
 import sys
+from typing import Optional
 
 from aiharness import __version__
 from aiharness.agent import AgentError, CodingAgent
 from aiharness.config import Settings
+from aiharness.event_log import RunEventLogger
 from aiharness.repository_tools import RepositoryTools, ToolError
 
 
@@ -41,6 +43,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--restore", nargs="?", const="latest", metavar="SNAPSHOT_ID",
         help="Restore a snapshot (defaults to the latest); asks before changing files",
+    )
+    parser.add_argument(
+        "--event-log", metavar="PATH",
+        help="Append redacted tool activity as JSONL to this path (no task, arguments, or file contents)",
     )
     parser.add_argument("--version", action="version", version=__version__)
     return parser.parse_args()
@@ -102,18 +108,25 @@ def main() -> int:
     if task:
         print("\nStarting coding agent...")
         try:
+            event_path = Path(args.event_log).expanduser() if args.event_log else None
+            if event_path is not None and not event_path.is_absolute():
+                event_path = repo / event_path
+            event_logger = RunEventLogger(event_path) if event_path else None
             agent = CodingAgent(
                 settings,
                 repository,
-                on_tool_call=lambda name: print(f"Tool call: {name}"),
+                on_tool_call=lambda name: _on_tool_call(name, event_logger),
                 mode=args.mode,
                 permission_prompt=_permission_prompt,
-                on_tool_result=_show_tool_result,
+                on_tool_result=lambda name, result: _on_tool_result(name, result, event_logger),
             )
             response = agent.run(task)
         except AgentError as exc:
             print(f"Agent stopped: {exc}", file=sys.stderr)
             return 1
+        except OSError as exc:
+            print(f"Could not initialize event log: {exc}", file=sys.stderr)
+            return 2
         print("\nAgent result:\n")
         print(response)
     else:
@@ -135,3 +148,21 @@ def _permission_prompt(action: str, resource: str) -> str:
 def _show_tool_result(name: str, result: object) -> None:
     if name == "write_file" and isinstance(result, dict) and result.get("snapshot_id"):
         print(f"Saved pre-edit snapshot: {result['snapshot_id']}")
+
+
+def _on_tool_call(name: str, event_logger: Optional[RunEventLogger]) -> None:
+    print(f"Tool call: {name}")
+    if event_logger:
+        try:
+            event_logger.on_tool_call(name)
+        except OSError as exc:
+            print(f"Event log unavailable: {exc}", file=sys.stderr)
+
+
+def _on_tool_result(name: str, result: object, event_logger: Optional[RunEventLogger]) -> None:
+    if event_logger:
+        try:
+            event_logger.on_tool_result(name, result)
+        except OSError as exc:
+            print(f"Event log unavailable: {exc}", file=sys.stderr)
+    _show_tool_result(name, result)

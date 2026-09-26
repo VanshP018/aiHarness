@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV ?= .venv
 VENV_PYTHON = $(VENV)/bin/python
 
-.PHONY: setup run test clean
+.PHONY: setup run test eval clean
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -14,6 +14,9 @@ run:
 
 test:
 	$(VENV_PYTHON) -m unittest discover -s tests -v
+
+eval:
+	$(VENV_PYTHON) -m unittest discover -s evaluations -v
 
 clean:
 	rm -rf $(VENV) build dist *.egg-info src/*.egg-info __pycache__
