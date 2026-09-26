@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiharness"
-version = "0.1.0"
+version = "0.2.0"
 description = "An autonomous coding-agent harness for the AI Harness Hackathon 2026"
 requires-python = ">=3.9"
 dependencies = []

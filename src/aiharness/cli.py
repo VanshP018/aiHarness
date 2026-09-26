@@ -1,4 +1,4 @@
-"""Phase 1 command-line entry point."""
+"""Command-line entry point for the AI coding harness."""
 
 import argparse
 import os
@@ -7,6 +7,7 @@ import sys
 
 from aiharness import __version__
 from aiharness.config import Settings
+from aiharness.model_client import ModelError, ResponsesClient
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,15 +38,13 @@ def main() -> int:
     settings = Settings.from_environment()
     print(f"AI Harness v{__version__}")
     print(f"Repository: {repo}")
-    print("Phase 1 foundation is ready.")
+    print("Phase 2 model interface is ready.")
     if settings.api_key:
         print("AI_API_KEY: configured")
     else:
-        print("AI_API_KEY: not set (required for model-backed execution)")
-    if settings.model:
-        print(f"AI_MODEL: {settings.model}")
-    else:
-        print("AI_MODEL: not set (awaiting the model specified by the organisers)")
+        print("AI_API_KEY: not set (add it to the environment or local .env file)")
+    print(f"AI_MODEL: {settings.model}")
+    print(f"AI_BASE_URL: {settings.base_url}")
 
     task = args.task
     if task is None and sys.stdin.isatty():
@@ -58,8 +57,14 @@ def main() -> int:
         task = sys.stdin.read().strip()
 
     if task:
-        print("\nTask received. Agent execution will be added in Phase 2.")
-        print(f"Task: {task}")
+        print("\nSending task to the text model...")
+        try:
+            response = ResponsesClient(settings).generate(task)
+        except ModelError as exc:
+            print(f"Model request failed: {exc}", file=sys.stderr)
+            return 1
+        print("\nModel response:\n")
+        print(response)
     else:
         print("\nNo task supplied. Pass --task or provide task text on stdin.")
     return 0
