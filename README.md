@@ -24,6 +24,23 @@ The coding agent sends the task to the model with repository-tool definitions, e
 
 Build mode is the default. Repository reads are available directly; before any file edit or command, the CLI asks whether to allow it once, allow that exact action for the current run, or deny it. Without an interactive terminal, these actions are denied. `--mode review` gives the model read-only repository tools, which is useful for code review.
 
+For repeatable decisions, pass `--permissions-file PATH` with an ordered JSON policy. Each rule contains an `action` (`read`, `edit`, `shell`, or `*`), a `resource` glob, and a `decision` (`allow`, `ask`, or `deny`). The first matching rule wins. File resources are repository-relative paths; shell resources are JSON objects containing `argv` and `cwd`. The initial repository map uses resource `repository-map`, project guidance uses its filename, and snapshots use `snapshots`. Unmatched reads are allowed and unmatched edits or shell commands still ask. Review mode always blocks edits and commands, regardless of policy.
+
+Example policy:
+
+```json
+{
+  "rules": [
+    {"action": "read", "resource": "private/*", "decision": "deny"},
+    {"action": "edit", "resource": "src/*.py", "decision": "allow"},
+    {"action": "shell", "resource": "*pytest*", "decision": "allow"},
+    {"action": "shell", "resource": "*git*push*", "decision": "deny"}
+  ]
+}
+```
+
+Save it as `.aiharness/permissions.json`, then pass `--permissions-file .aiharness/permissions.json`. Policy files are explicit local configuration and should be reviewed like any other permission grant.
+
 Before each file write, the harness saves that file's previous contents under the ignored `.aiharness/snapshots/` directory. Snapshots are local and are not committed. List them with `make run ARGS='--repo /path/to/repository --list-snapshots'`; restore the newest with `make run ARGS='--repo /path/to/repository --restore'` or choose an ID with `--restore SNAPSHOT_ID`. Restore asks for confirmation and saves the current version as a rollback snapshot first.
 
 At startup the agent receives a concise repository file map and, when present, the root `AGENTS.md` or `AIHARNES.md`. It is instructed to inspect focused files before editing, run relevant checks after edits, repair failures, and report checks that were skipped or remain failing. Project guidance cannot override tool permissions.
@@ -69,7 +86,7 @@ The `make test` command runs the Python unittest framework in the project's virt
 
 **Expected output:** When tests pass, you'll see each test name followed by `... ok` and a summary like:
 ```
-Ran 23 tests in 0.049s
+Ran 27 tests in 0.049s
 OK
 ```
 

@@ -133,6 +133,15 @@ class CodingAgentTests(unittest.TestCase):
         self.assertEqual(offered, {"list_files", "read_file", "search_text", "list_snapshots"})
         self.assertIn("Permission denied", denied["error"])
 
+    def test_read_policy_is_applied_to_requested_file_paths(self):
+        agent = CodingAgent(
+            self.settings,
+            RepositoryTools(self.root),
+            permission_rules=[{"action": "read", "resource": "README.md", "decision": "deny"}],
+        )
+        result = agent._execute("read_file", json.dumps({"path": "README.md"}))
+        self.assertIn("Permission denied", result["error"])
+
     def test_invalid_tool_arguments_are_returned_to_model_as_tool_error(self):
         class InvalidArgsClient:
             def __init__(self, _settings):

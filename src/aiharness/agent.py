@@ -1,7 +1,7 @@
 """Bounded model/tool orchestration for coding tasks."""
 
 import json
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from aiharness.config import Settings
 from aiharness.model_client import ModelError, OpenRouterClient
@@ -151,13 +151,14 @@ class CodingAgent:
         mode: str = "build",
         permission_prompt: Optional[Callable[[str, str], str]] = None,
         on_tool_result: Optional[Callable[[str, object], None]] = None,
+        permission_rules: Optional[Sequence[dict[str, str]]] = None,
     ) -> None:
         self.client = OpenRouterClient(settings)
         self.repository = repository
         self.max_model_turns = max_model_turns
         self.max_tool_calls = max_tool_calls
         self.on_tool_call = on_tool_call
-        self.permissions = PermissionManager(mode=mode, prompt=permission_prompt)
+        self.permissions = PermissionManager(mode=mode, prompt=permission_prompt, rules=permission_rules)
         self.on_tool_result = on_tool_result
         self.mode = mode
 
@@ -166,8 +167,19 @@ class CodingAgent:
             raise AgentError("Task cannot be empty.")
         if len(task) > MAX_TASK_CHARS:
             raise AgentError(f"Task exceeds the {MAX_TASK_CHARS}-character input limit.")
-        repository_map = self.repository.repository_map()
-        project_instructions = self.repository.project_instructions()
+        if self.permissions.request("read", "repository-map"):
+            repository_map = self.repository.repository_map()
+        else:
+            repository_map = "Repository map omitted by the active read policy."
+        project_instructions = None
+        for filename in ("AGENTS.md", "AIHARNES.md"):
+            if (self.repository.root / filename).exists():
+                if self.permissions.request("read", filename):
+                    try:
+                        project_instructions = (filename, self.repository.read_file(filename))
+                    except ToolError:
+                        project_instructions = None
+                break
         context = f"Repository root: {self.repository.root}\nMode: {self.mode}\n\n{repository_map}"
         if project_instructions:
             filename, content = project_instructions
@@ -307,6 +319,10 @@ class CodingAgent:
     def _permission_resource(name: str, arguments: dict) -> str:
         if name in {"write_file", "restore_snapshot"}:
             return str(arguments.get("path", arguments.get("snapshot_id", "latest")))
+        if name in {"list_files", "read_file", "search_text"}:
+            return str(arguments.get("path", "."))
+        if name == "list_snapshots":
+            return "snapshots"
         if name == "run_command":
             return json.dumps({"argv": arguments.get("argv"), "cwd": arguments.get("cwd", ".")}, ensure_ascii=False)
         return "repository"

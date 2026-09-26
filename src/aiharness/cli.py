@@ -10,6 +10,7 @@ from aiharness import __version__
 from aiharness.agent import AgentError, CodingAgent
 from aiharness.config import Settings
 from aiharness.event_log import RunEventLogger
+from aiharness.permissions import PermissionManager, load_permission_rules
 from aiharness.repository_tools import RepositoryTools, ToolError
 
 
@@ -48,6 +49,10 @@ def _parse_args() -> argparse.Namespace:
         "--event-log", metavar="PATH",
         help="Append redacted tool activity as JSONL to this path (no task, arguments, or file contents)",
     )
+    parser.add_argument(
+        "--permissions-file", metavar="PATH",
+        help="Load ordered JSON allow/ask/deny rules for tool actions and resources",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser.parse_args()
 
@@ -58,6 +63,17 @@ def main() -> int:
     if not repo.is_dir():
         print(f"Repository directory does not exist: {repo}", file=sys.stderr)
         return 2
+
+    permission_rules = []
+    if args.permissions_file:
+        policy_path = Path(args.permissions_file).expanduser()
+        if not policy_path.is_absolute():
+            policy_path = repo / policy_path
+        try:
+            permission_rules = load_permission_rules(policy_path)
+        except ValueError as exc:
+            print(f"Invalid permissions file: {exc}", file=sys.stderr)
+            return 2
 
     if args.inspect:
         try:
@@ -73,7 +89,12 @@ def main() -> int:
             print(f"{item['snapshot_id']}  {item['path']}  {item['created_at']}")
         return 0
     if args.restore:
-        if not sys.stdin.isatty() or _permission_prompt("edit", f"restore snapshot {args.restore}") not in {"once", "session"}:
+        permission_manager = PermissionManager(
+            mode=args.mode,
+            prompt=_permission_prompt if sys.stdin.isatty() else None,
+            rules=permission_rules,
+        )
+        if not permission_manager.request("edit", args.restore):
             print("Snapshot restore declined; run this command in an interactive terminal to approve it.", file=sys.stderr)
             return 1
         try:
@@ -87,7 +108,12 @@ def main() -> int:
     settings = Settings.from_environment()
     print(f"AI Harness v{__version__}")
     print(f"Repository: {repo}")
-    print(f"Mode: {args.mode} ({'read-only' if args.mode == 'review' else 'asks before edits and commands'})")
+    mode_description = (
+        "read-only" if args.mode == "review"
+        else "policy-controlled" if args.permissions_file
+        else "asks before edits and commands"
+    )
+    print(f"Mode: {args.mode} ({mode_description})")
     if settings.api_key:
         print("AI_API_KEY: configured")
     else:
@@ -119,6 +145,7 @@ def main() -> int:
                 mode=args.mode,
                 permission_prompt=_permission_prompt,
                 on_tool_result=lambda name, result: _on_tool_result(name, result, event_logger),
+                permission_rules=permission_rules,
             )
             response = agent.run(task)
         except AgentError as exc:
