@@ -1,4 +1,4 @@
-"""Text-only client for OpenRouter's Responses API."""
+"""Text-only HTTP client for OpenRouter text and tool-calling APIs."""
 
 import json
 from urllib.error import HTTPError, URLError
@@ -11,7 +11,7 @@ class ModelError(RuntimeError):
     """Raised when a model request fails or returns no usable text."""
 
 
-class ResponsesClient:
+class OpenRouterClient:
     def __init__(self, settings: Settings, timeout: float = 120.0) -> None:
         self.settings = settings
         self.timeout = timeout
@@ -59,6 +59,46 @@ class ResponsesClient:
         if not text:
             raise ModelError("Model API response contained no text output.")
         return text
+
+    def chat_completion(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Request one non-streaming tool-capable OpenRouter chat-completion turn."""
+        if not self.settings.api_key:
+            raise ModelError(
+                "AI_API_KEY is not set. Export it in the shell or add it to a local .env file."
+            )
+        payload = {
+            "model": self.settings.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "max_tokens": 4000,
+        }
+        request = Request(
+            self.settings.base_url.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.settings.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")[:1000]
+            raise ModelError(f"Model API returned HTTP {exc.code}: {details}") from None
+        except URLError as exc:
+            raise ModelError(f"Could not reach model API: {exc.reason}") from None
+        except TimeoutError:
+            raise ModelError(f"Model request timed out after {self.timeout:g} seconds.") from None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise ModelError("Model API returned an invalid JSON response.") from None
+        if not isinstance(data, dict):
+            raise ModelError("Model API returned an invalid response object.")
+        return data
 
     @staticmethod
     def _extract_text(data: dict) -> str:

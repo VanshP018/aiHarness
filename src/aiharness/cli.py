@@ -6,8 +6,8 @@ from pathlib import Path
 import sys
 
 from aiharness import __version__
+from aiharness.agent import AgentError, CodingAgent
 from aiharness.config import Settings
-from aiharness.model_client import ModelError, ResponsesClient
 from aiharness.repository_tools import RepositoryTools, ToolError
 
 
@@ -52,7 +52,7 @@ def main() -> int:
     settings = Settings.from_environment()
     print(f"AI Harness v{__version__}")
     print(f"Repository: {repo}")
-    print("Phase 3 repository tools are ready.")
+    print("Phase 4 agent orchestration is ready.")
     if settings.api_key:
         print("AI_API_KEY: configured")
     else:
@@ -71,13 +71,18 @@ def main() -> int:
         task = sys.stdin.read().strip()
 
     if task:
-        print("\nSending task to the text model...")
+        print("\nStarting coding agent...")
         try:
-            response = ResponsesClient(settings).generate(task)
-        except ModelError as exc:
-            print(f"Model request failed: {exc}", file=sys.stderr)
+            agent = CodingAgent(
+                settings,
+                RepositoryTools(repo),
+                on_tool_call=lambda name: print(f"Tool call: {name}"),
+            )
+            response = agent.run(task)
+        except AgentError as exc:
+            print(f"Agent stopped: {exc}", file=sys.stderr)
             return 1
-        print("\nModel response:\n")
+        print("\nAgent result:\n")
         print(response)
     else:
         print("\nNo task supplied. Pass --task or provide task text on stdin.")
